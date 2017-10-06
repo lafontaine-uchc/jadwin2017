@@ -1,0 +1,198 @@
+---
+title: "Comparison of Position Weight Matricies using Euclidean Distance"
+output:
+  word_document: default
+  html_notebook: default
+  html_document: default
+---
+
+```{r}
+library(ggplot2)
+library(readr)
+library(dplyr)
+library(stringr)
+library(cowplot) #plot_grid
+library(readxl) #load Jadwin data excel_sheets, read_excel
+
+source("./functions.R")
+```
+
+Set before and after parameters for # of aa
+```{r}
+#Number of Amino Acids to include Before and After Tyrosine
+before<-1
+after<-4
+
+#Remove central tyrosine to avoid biasing distance values
+remove_Y<-TRUE
+```
+
+Load Jadwin data
+```{r}
+JadwinFile<-"./LOGO data.xlsx"
+sheetNames<-excel_sheets(JadwinFile)
+for (x in sheetNames){
+  tempData<-read_excel(JadwinFile, sheet = x)
+  print(x)
+  if ("Weighted LIst" %in% colnames(tempData)){
+    tempData$`Weighted List`<-tempData$`Weighted LIst`
+  }
+  assign(x, tempData$`Weighted List`)
+}
+```
+
+Shorten Jadwin data to parameters listed above, filter out sequences with too few aa & remove Y from sequences
+```{r}
+`CRK Jadwin et al`<-substr(`CRK Jadwin et al`,(7-before),(7+after))
+`GRB2 Jadwin et al`<-substr(`GRB2 Jadwin et al`,(7-before),(7+after))
+#filter
+`CRK Jadwin et al`<-`CRK Jadwin et al`[(nchar(`CRK Jadwin et al`)>(before+after))]
+`GRB2 Jadwin et al`<-`GRB2 Jadwin et al`[(nchar(`GRB2 Jadwin et al`)>(before+after))]
+
+if (remove_Y){
+  `CRK Jadwin et al`<-paste(substr(`CRK Jadwin et al`,1,before),substr(`CRK Jadwin et al`,before + 2,before+after+1),sep = "")
+  `GRB2 Jadwin et al`<-paste(substr(`GRB2 Jadwin et al`,1,before),substr(`GRB2 Jadwin et al`,before + 2,before+after+1),sep = "")
+}
+```
+
+Create PWM lists for Jadwin data
+```{r}
+  jadwin_list<-c("CRK Jadwin et al","GRB2 Jadwin et al")
+  jadwin_pwm_list<-lapply(jadwin_list, function(x){
+  PWM(get(x),do.pseudocounts = T)
+})
+```
+
+Functions - load and modify Tinti files
+Filters for aa sequences of correct length
+Removes Y from sequences
+```{r, message=FALSE, warning=FALSE}
+#read tinti data
+filenames<-list.files("./normalization/SH2_all_noreplicates_02-05-2007/",full.names = TRUE)
+tinti_data<-lapply(filenames,read_csv)
+tinti_data<-do.call(rbind,tinti_data)
+#clean data
+tinti_data<-
+  tinti_data %>%
+  filter(spot_flag != "BAD") %>%
+  filter(peptide_sequence != "none") #%>%
+#trim
+tinti_data$peptide_sequence<-substr(tinti_data$peptide_sequence,7-before,after+7)
+#filter
+tinti_data<-tinti_data%>%filter(nchar(peptide_sequence)>(before+after))
+if (remove_Y){
+  tinti_data$peptide_sequence<-paste(substr(tinti_data$peptide_sequence,1,before),substr(tinti_data$peptide_sequence,before + 2,before+after+1),sep = "")
+}
+```
+
+
+Calculate standard deviation, median and threshold samples
+Applies thresholding used in Tinti paper
+```{r}
+statistics<-tinti_data%>%group_by(domain_shortlabel)%>%summarise(stddev = sd(log_ratio),med = median(log_ratio))
+tinti_data<-left_join(tinti_data,statistics,by="domain_shortlabel")
+tinti_data<-tinti_data%>%filter(log_ratio>(2*stddev+med))
+```
+
+Creating PWMs for tinti data
+```{r}
+sh2_list<-levels(as.factor(tinti_data$domain_shortlabel))
+PWM_list<-lapply(sh2_list, function(x) {
+  sequences<-tinti_data%>%filter(domain_shortlabel ==x)
+  PWM(sequences$peptide_sequence,do.pseudocounts = T)
+})
+```
+
+
+Calculate distances for all Jadwin-Tinti SH2 combinations and arrange into dataframe
+```{r}
+#creates empty data frame for distances
+enhanced_df<-data.frame(pair = c(), euclidean = c())
+
+#iterates through all combinations of jadwin and tinti pwms
+for (i in 1:(length(sh2_list))){
+  for (j in 1:length(jadwin_list)){
+    #creates temp dataframe with row containing name of tinti and jadwin samples and caculated distance for that pair
+    temp<-data.frame(pair1=sh2_list[i],pair2 = jadwin_list[j],euclidean=get_distance(PWM_list[[i]],jadwin_pwm_list[[j]]),denom =(dim(PWM_list[[i]])[2]+dim(jadwin_pwm_list[[j]])[2]))
+    #stores temporary row in enhanced_df dataframe
+    enhanced_df<-rbind(enhanced_df,temp)
+    #saves copy of CRK(GCG) tinti-jadwin distance
+    if ((sh2_list[i] == "CRK") & (jadwin_list[j] == "CRK Jadwin et al")){
+      CRK_euclidean<-temp[3]$euclidean
+    }
+    #saves copy of GRB2 tinti-jadwin distance
+    if ((sh2_list[i] == "GRB2 ASH") & (jadwin_list[j] == "GRB2 Jadwin et al")){
+      GRB2_euclidean<-temp[3]$euclidean
+    }
+  } 
+}
+```
+
+Set bin size for final plots
+```{r}
+binsize=0.1
+```
+
+Plot GRB2-TintiGRB2 distance vs all GRB2-Tinti distances
+```{r}
+plotData<-enhanced_df%>%filter(pair2=="GRB2 Jadwin et al")
+#creates dataframe with names and distances for the two pairs which correspond to the jadwin data(ie. Grb2-Grb2 and GCG-Crk)
+lines_df<-data.frame(name=c("GRB2_euclidean","CRK_euclidean"),euclidean=c(GRB2_euclidean,CRK_euclidean),grp=letters[3:4])
+lines_df<-lines_df%>%filter(name == "GRB2_euclidean")
+plot1<-create_histogram(plotData, binsize, lines_df)
+```
+
+Plot GCG-TintiCrk distance vs all GCG-Tinti distances
+```{r}
+plotData<-enhanced_df%>%filter(pair2=="CRK Jadwin et al")
+lines_df<-data.frame(name=c("GRB2_euclidean","CRK_euclidean"),euclidean=c(GRB2_euclidean,CRK_euclidean),grp=letters[3:4])
+lines_df<-lines_df%>%filter(name == "CRK_euclidean")
+plot2<-create_histogram(plotData, binsize, lines_df)
+```
+
+Combine Plots into single figure
+```{r}
+title <- ggdraw() + draw_label("Distribution of Euclidean Distances", fontface='bold')
+p<-plot_grid(plot1, plot2, align='h', labels=c('A', 'B'))
+pg<-plot_grid(title, p, ncol=1, rel_heights=c(0.1, 1)) # rel_heights values control title margins
+save_plot("pg.pdf", pg, base_aspect_ratio = 1.5)
+pg
+```
+
+
+
+Find sh2 domains which are closer to Jadwin GCG than tinti GCG
+```{r}
+GCGBar<-enhanced_df%>%filter(pair2=="CRK Jadwin et al")%>%arrange(euclidean)
+create_bar_graph(GCGBar,"CRK")
+```
+Calculate number for figure
+```{r}
+lines_df<-data.frame(name=c("GRB2_euclidean","CRK_euclidean"),euclidean=c(GRB2_euclidean,CRK_euclidean),grp=letters[3:4])
+calculated_percentage_lower(enhanced_df,"CRK Jadwin et al", "CRK_euclidean",lines_df)
+```
+
+Find sh2 domains which are closer to Jadwin GRB2 than tinti GRB2
+```{r}
+GRB2Bar<-enhanced_df%>%filter(pair2=="GRB2 Jadwin et al")%>%arrange(euclidean)
+create_bar_graph(GRB2Bar,"GRB2 ASH")
+```
+Calculate number for figure
+```{r}
+calculated_percentage_lower(enhanced_df,"GRB2 Jadwin et al", "GRB2_euclidean",lines_df)
+```
+
+Data used for CRK/GCG figures
+```{r}
+enhanced_df%>%filter(pair2=="CRK Jadwin et al")
+```
+
+Data used for GRB2 figures
+```{r}
+enhanced_df%>%filter(pair2 == "GRB2 Jadwin et al")
+```
+
+Write session information to document packages
+```{r}
+writeLines(capture.output(sessionInfo()), "session_info.txt")
+```
